@@ -102,7 +102,7 @@ func (s *SDK) Identifiers() *queries.IdentifierQuery {
 // Prices returns the price query interface.
 func (s *SDK) Prices() *queries.PriceQuery {
 	if s.prices == nil {
-		s.prices = queries.NewPriceQuery(s.conn, s.cache)
+		s.prices = queries.NewPriceQuery(s.conn)
 	}
 	return s.prices
 }
@@ -126,7 +126,7 @@ func (s *SDK) Enums() *queries.EnumQuery {
 // Skus returns the TCGPlayer SKU query interface.
 func (s *SDK) Skus() *queries.SkuQuery {
 	if s.skus == nil {
-		s.skus = queries.NewSkuQuery(s.conn, s.cache)
+		s.skus = queries.NewSkuQuery(s.conn)
 	}
 	return s.skus
 }

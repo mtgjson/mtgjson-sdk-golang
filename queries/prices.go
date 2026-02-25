@@ -1,14 +1,8 @@
 package queries
 
 import (
-	"compress/gzip"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"log/slog"
-	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/mtgjson/mtgjson-sdk-go/db"
@@ -16,49 +10,32 @@ import (
 )
 
 // PriceQuery provides methods to query card price data.
-// Prices come from AllPricesToday.json.gz, flattened and loaded into DuckDB.
+// Prices come from AllPricesToday.parquet, registered as a DuckDB view.
 type PriceQuery struct {
-	conn   *db.Connection
-	cache  *db.CacheManager
-	loaded bool
+	conn *db.Connection
 }
 
-func NewPriceQuery(conn *db.Connection, cache *db.CacheManager) *PriceQuery {
-	return &PriceQuery{conn: conn, cache: cache}
+func NewPriceQuery(conn *db.Connection) *PriceQuery {
+	return &PriceQuery{conn: conn}
 }
 
-func (q *PriceQuery) ensure(ctx context.Context) error {
-	if q.loaded {
-		return nil
-	}
-	if q.conn.HasView("prices_today") {
-		q.loaded = true
-		return nil
-	}
-	path, err := q.cache.EnsureJSON(ctx, "all_prices_today")
-	if err != nil {
-		slog.Warn("Price data not available", "error", err)
-		q.loaded = true
-		return nil
-	}
-	if err := loadPricesToDuckDB(ctx, path, q.conn); err != nil {
-		return err
-	}
-	q.loaded = true
-	return nil
+func (q *PriceQuery) ensure(ctx context.Context) {
+	_ = q.conn.EnsureViews(ctx, "all_prices_today")
+}
+
+func (q *PriceQuery) ensureHistory(ctx context.Context) {
+	_ = q.conn.EnsureViews(ctx, "all_prices")
 }
 
 // Get returns full price data for a card UUID as a nested map.
 // Returns nil if no price data exists.
 func (q *PriceQuery) Get(ctx context.Context, uuid string) (map[string]any, error) {
-	if err := q.ensure(ctx); err != nil {
-		return nil, err
-	}
-	if !q.conn.HasView("prices_today") {
+	q.ensure(ctx)
+	if !q.conn.HasView("all_prices_today") {
 		return nil, nil
 	}
 	rows, err := q.conn.Execute(ctx,
-		"SELECT * FROM prices_today WHERE uuid = $1 ORDER BY source, provider, category, finish, date",
+		"SELECT * FROM all_prices_today WHERE uuid = $1 ORDER BY source, provider, price_type, finish, date",
 		uuid)
 	if err != nil {
 		return nil, err
@@ -71,7 +48,7 @@ func (q *PriceQuery) Get(ctx context.Context, uuid string) (map[string]any, erro
 	for _, r := range rows {
 		src, _ := r["source"].(string)
 		prov, _ := r["provider"].(string)
-		cat, _ := r["category"].(string)
+		cat, _ := r["price_type"].(string)
 		fin, _ := r["finish"].(string)
 		date, _ := r["date"].(string)
 		price := r["price"]
@@ -92,10 +69,8 @@ func (q *PriceQuery) Get(ctx context.Context, uuid string) (map[string]any, erro
 
 // Today returns the latest prices for a card UUID.
 func (q *PriceQuery) Today(ctx context.Context, uuid string, opts ...PriceFilterOption) ([]map[string]any, error) {
-	if err := q.ensure(ctx); err != nil {
-		return nil, err
-	}
-	if !q.conn.HasView("prices_today") {
+	q.ensure(ctx)
+	if !q.conn.HasView("all_prices_today") {
 		return nil, nil
 	}
 	cfg := &priceFilter{}
@@ -104,9 +79,9 @@ func (q *PriceQuery) Today(ctx context.Context, uuid string, opts ...PriceFilter
 	}
 
 	parts := []string{
-		"SELECT * FROM prices_today",
+		"SELECT * FROM all_prices_today",
 		"WHERE uuid = $1",
-		"AND date = (SELECT MAX(p2.date) FROM prices_today p2 WHERE p2.uuid = $1)",
+		"AND date = (SELECT MAX(p2.date) FROM all_prices_today p2 WHERE p2.uuid = $1)",
 	}
 	params := []any{uuid}
 	idx := 2
@@ -121,9 +96,9 @@ func (q *PriceQuery) Today(ctx context.Context, uuid string, opts ...PriceFilter
 		params = append(params, cfg.finish)
 		idx++
 	}
-	if cfg.category != "" {
-		parts = append(parts, fmt.Sprintf("AND category = $%d", idx))
-		params = append(params, cfg.category)
+	if cfg.priceType != "" {
+		parts = append(parts, fmt.Sprintf("AND price_type = $%d", idx))
+		params = append(params, cfg.priceType)
 	}
 
 	return q.conn.Execute(ctx, strings.Join(parts, " "), params...)
@@ -131,10 +106,8 @@ func (q *PriceQuery) Today(ctx context.Context, uuid string, opts ...PriceFilter
 
 // History returns price history for a card UUID.
 func (q *PriceQuery) History(ctx context.Context, uuid string, opts ...PriceHistoryOption) ([]map[string]any, error) {
-	if err := q.ensure(ctx); err != nil {
-		return nil, err
-	}
-	if !q.conn.HasView("prices_today") {
+	q.ensureHistory(ctx)
+	if !q.conn.HasView("all_prices") {
 		return nil, nil
 	}
 	cfg := &priceHistoryConfig{}
@@ -142,7 +115,7 @@ func (q *PriceQuery) History(ctx context.Context, uuid string, opts ...PriceHist
 		opt(cfg)
 	}
 
-	parts := []string{"SELECT * FROM prices_today WHERE uuid = $1"}
+	parts := []string{"SELECT * FROM all_prices WHERE uuid = $1"}
 	params := []any{uuid}
 	idx := 2
 
@@ -156,9 +129,9 @@ func (q *PriceQuery) History(ctx context.Context, uuid string, opts ...PriceHist
 		params = append(params, cfg.finish)
 		idx++
 	}
-	if cfg.category != "" {
-		parts = append(parts, fmt.Sprintf("AND category = $%d", idx))
-		params = append(params, cfg.category)
+	if cfg.priceType != "" {
+		parts = append(parts, fmt.Sprintf("AND price_type = $%d", idx))
+		params = append(params, cfg.priceType)
 		idx++
 	}
 	if cfg.dateFrom != "" {
@@ -177,13 +150,11 @@ func (q *PriceQuery) History(ctx context.Context, uuid string, opts ...PriceHist
 
 // PriceTrend returns price trend statistics for a card.
 func (q *PriceQuery) PriceTrend(ctx context.Context, uuid string, opts ...PriceFilterOption) (*models.PriceTrend, error) {
-	if err := q.ensure(ctx); err != nil {
-		return nil, err
-	}
-	if !q.conn.HasView("prices_today") {
+	q.ensureHistory(ctx)
+	if !q.conn.HasView("all_prices") {
 		return nil, nil
 	}
-	cfg := &priceFilter{category: "retail"}
+	cfg := &priceFilter{priceType: "retail"}
 	for _, opt := range opts {
 		opt(cfg)
 	}
@@ -196,10 +167,10 @@ func (q *PriceQuery) PriceTrend(ctx context.Context, uuid string, opts ...PriceF
 		"  MIN(date) AS first_date,",
 		"  MAX(date) AS last_date,",
 		"  COUNT(*) AS data_points",
-		"FROM prices_today",
-		"WHERE uuid = $1 AND category = $2",
+		"FROM all_prices",
+		"WHERE uuid = $1 AND price_type = $2",
 	}
-	params := []any{uuid, cfg.category}
+	params := []any{uuid, cfg.priceType}
 	idx := 3
 
 	if cfg.provider != "" {
@@ -235,31 +206,29 @@ func (q *PriceQuery) PriceTrend(ctx context.Context, uuid string, opts ...PriceF
 
 // CheapestPrinting finds the cheapest printing of a card by name.
 func (q *PriceQuery) CheapestPrinting(ctx context.Context, name string, opts ...PriceFilterOption) (map[string]any, error) {
-	if err := q.ensure(ctx); err != nil {
-		return nil, err
-	}
+	q.ensure(ctx)
 	if err := q.conn.EnsureViews(ctx, "cards"); err != nil {
 		return nil, err
 	}
-	if !q.conn.HasView("prices_today") {
+	if !q.conn.HasView("all_prices_today") {
 		return nil, nil
 	}
-	cfg := &priceFilter{provider: "tcgplayer", finish: "normal", category: "retail"}
+	cfg := &priceFilter{provider: "tcgplayer", finish: "normal", priceType: "retail"}
 	for _, opt := range opts {
 		opt(cfg)
 	}
 
 	sql := "SELECT c.uuid, c.setCode, c.number, p.price, p.date " +
 		"FROM cards c " +
-		"JOIN prices_today p ON c.uuid = p.uuid " +
+		"JOIN all_prices_today p ON c.uuid = p.uuid " +
 		"WHERE c.name = $1 AND p.provider = $2 " +
-		"AND p.finish = $3 AND p.category = $4 " +
-		"AND p.date = (SELECT MAX(p2.date) FROM prices_today p2 " +
+		"AND p.finish = $3 AND p.price_type = $4 " +
+		"AND p.date = (SELECT MAX(p2.date) FROM all_prices_today p2 " +
 		"WHERE p2.uuid = c.uuid AND p2.provider = $2 " +
-		"AND p2.finish = $3 AND p2.category = $4) " +
+		"AND p2.finish = $3 AND p2.price_type = $4) " +
 		"ORDER BY p.price ASC " +
 		"LIMIT 1"
-	rows, err := q.conn.Execute(ctx, sql, name, cfg.provider, cfg.finish, cfg.category)
+	rows, err := q.conn.Execute(ctx, sql, name, cfg.provider, cfg.finish, cfg.priceType)
 	if err != nil {
 		return nil, err
 	}
@@ -271,16 +240,14 @@ func (q *PriceQuery) CheapestPrinting(ctx context.Context, name string, opts ...
 
 // CheapestPrintings finds the cheapest available printing of each card.
 func (q *PriceQuery) CheapestPrintings(ctx context.Context, opts ...PriceListOption) ([]models.PricePrinting, error) {
-	if err := q.ensure(ctx); err != nil {
-		return nil, err
-	}
+	q.ensure(ctx)
 	if err := q.conn.EnsureViews(ctx, "cards"); err != nil {
 		return nil, err
 	}
-	if !q.conn.HasView("prices_today") {
+	if !q.conn.HasView("all_prices_today") {
 		return nil, nil
 	}
-	cfg := &priceListConfig{provider: "tcgplayer", finish: "normal", category: "retail", limit: 100}
+	cfg := &priceListConfig{provider: "tcgplayer", finish: "normal", priceType: "retail", limit: 100}
 	for _, opt := range opts {
 		opt(cfg)
 	}
@@ -292,15 +259,15 @@ func (q *PriceQuery) CheapestPrintings(ctx context.Context, opts ...PriceListOpt
 			"  arg_min(c.uuid, p.price) AS cheapest_uuid, "+
 			"  MIN(p.price) AS min_price "+
 			"FROM cards c "+
-			"JOIN prices_today p ON c.uuid = p.uuid "+
-			"WHERE p.provider = $1 AND p.finish = $2 AND p.category = $3 "+
-			"AND p.date = (SELECT MAX(date) FROM prices_today) "+
+			"JOIN all_prices_today p ON c.uuid = p.uuid "+
+			"WHERE p.provider = $1 AND p.finish = $2 AND p.price_type = $3 "+
+			"AND p.date = (SELECT MAX(date) FROM all_prices_today) "+
 			"GROUP BY c.name "+
 			"ORDER BY min_price ASC "+
 			"LIMIT %d OFFSET %d", cfg.limit, cfg.offset)
 
 	var result []models.PricePrinting
-	if err := q.conn.ExecuteInto(ctx, &result, sql, cfg.provider, cfg.finish, cfg.category); err != nil {
+	if err := q.conn.ExecuteInto(ctx, &result, sql, cfg.provider, cfg.finish, cfg.priceType); err != nil {
 		return nil, err
 	}
 	return result, nil
@@ -308,16 +275,14 @@ func (q *PriceQuery) CheapestPrintings(ctx context.Context, opts ...PriceListOpt
 
 // MostExpensivePrintings finds the most expensive printing of each card.
 func (q *PriceQuery) MostExpensivePrintings(ctx context.Context, opts ...PriceListOption) ([]models.ExpensivePrinting, error) {
-	if err := q.ensure(ctx); err != nil {
-		return nil, err
-	}
+	q.ensure(ctx)
 	if err := q.conn.EnsureViews(ctx, "cards"); err != nil {
 		return nil, err
 	}
-	if !q.conn.HasView("prices_today") {
+	if !q.conn.HasView("all_prices_today") {
 		return nil, nil
 	}
-	cfg := &priceListConfig{provider: "tcgplayer", finish: "normal", category: "retail", limit: 100}
+	cfg := &priceListConfig{provider: "tcgplayer", finish: "normal", priceType: "retail", limit: 100}
 	for _, opt := range opts {
 		opt(cfg)
 	}
@@ -329,15 +294,15 @@ func (q *PriceQuery) MostExpensivePrintings(ctx context.Context, opts ...PriceLi
 			"  arg_max(c.uuid, p.price) AS priciest_uuid, "+
 			"  MAX(p.price) AS max_price "+
 			"FROM cards c "+
-			"JOIN prices_today p ON c.uuid = p.uuid "+
-			"WHERE p.provider = $1 AND p.finish = $2 AND p.category = $3 "+
-			"AND p.date = (SELECT MAX(date) FROM prices_today) "+
+			"JOIN all_prices_today p ON c.uuid = p.uuid "+
+			"WHERE p.provider = $1 AND p.finish = $2 AND p.price_type = $3 "+
+			"AND p.date = (SELECT MAX(date) FROM all_prices_today) "+
 			"GROUP BY c.name "+
 			"ORDER BY max_price DESC "+
 			"LIMIT %d OFFSET %d", cfg.limit, cfg.offset)
 
 	var result []models.ExpensivePrinting
-	if err := q.conn.ExecuteInto(ctx, &result, sql, cfg.provider, cfg.finish, cfg.category); err != nil {
+	if err := q.conn.ExecuteInto(ctx, &result, sql, cfg.provider, cfg.finish, cfg.priceType); err != nil {
 		return nil, err
 	}
 	return result, nil
@@ -346,9 +311,9 @@ func (q *PriceQuery) MostExpensivePrintings(ctx context.Context, opts ...PriceLi
 // --- Functional option types ---
 
 type priceFilter struct {
-	provider string
-	finish   string
-	category string
+	provider  string
+	finish    string
+	priceType string
 }
 
 // PriceFilterOption configures price query filters.
@@ -364,17 +329,17 @@ func WithPriceFinish(finish string) PriceFilterOption {
 	return func(c *priceFilter) { c.finish = finish }
 }
 
-// WithPriceCategory filters by price category ("retail" or "buylist").
-func WithPriceCategory(category string) PriceFilterOption {
-	return func(c *priceFilter) { c.category = category }
+// WithPriceType filters by price type ("retail" or "buylist").
+func WithPriceType(priceType string) PriceFilterOption {
+	return func(c *priceFilter) { c.priceType = priceType }
 }
 
 type priceHistoryConfig struct {
-	provider string
-	finish   string
-	category string
-	dateFrom string
-	dateTo   string
+	provider  string
+	finish    string
+	priceType string
+	dateFrom  string
+	dateTo    string
 }
 
 // PriceHistoryOption configures price history query filters.
@@ -390,9 +355,9 @@ func WithHistoryFinish(finish string) PriceHistoryOption {
 	return func(c *priceHistoryConfig) { c.finish = finish }
 }
 
-// WithHistoryCategory filters history by category.
-func WithHistoryCategory(category string) PriceHistoryOption {
-	return func(c *priceHistoryConfig) { c.category = category }
+// WithHistoryPriceType filters history by price type.
+func WithHistoryPriceType(priceType string) PriceHistoryOption {
+	return func(c *priceHistoryConfig) { c.priceType = priceType }
 }
 
 // WithDateFrom sets the start date filter (inclusive, YYYY-MM-DD).
@@ -406,11 +371,11 @@ func WithDateTo(date string) PriceHistoryOption {
 }
 
 type priceListConfig struct {
-	provider string
-	finish   string
-	category string
-	limit    int
-	offset   int
+	provider  string
+	finish    string
+	priceType string
+	limit     int
+	offset    int
 }
 
 // PriceListOption configures cheapest/most expensive printing queries.
@@ -426,9 +391,9 @@ func WithListFinish(finish string) PriceListOption {
 	return func(c *priceListConfig) { c.finish = finish }
 }
 
-// WithListCategory sets the category for list queries.
-func WithListCategory(category string) PriceListOption {
-	return func(c *priceListConfig) { c.category = category }
+// WithListPriceType sets the price type for list queries.
+func WithListPriceType(priceType string) PriceListOption {
+	return func(c *priceListConfig) { c.priceType = priceType }
 }
 
 // WithListLimit sets the max results for list queries.
@@ -441,7 +406,7 @@ func WithListOffset(offset int) PriceListOption {
 	return func(c *priceListConfig) { c.offset = offset }
 }
 
-// --- Price data loading ---
+// --- Helper ---
 
 func ensureNestedMap(parent map[string]any, key string) map[string]any {
 	if v, ok := parent[key]; ok {
@@ -452,106 +417,4 @@ func ensureNestedMap(parent map[string]any, key string) map[string]any {
 	m := make(map[string]any)
 	parent[key] = m
 	return m
-}
-
-// StreamFlattenPrices flattens nested price data to NDJSON rows written to w.
-// Returns the number of rows written.
-func StreamFlattenPrices(data map[string]any, w io.Writer) int {
-	enc := json.NewEncoder(w)
-	count := 0
-	for uuid, formatsRaw := range data {
-		formats, ok := formatsRaw.(map[string]any)
-		if !ok {
-			continue
-		}
-		for source, providersRaw := range formats { // paper, mtgo
-			providers, ok := providersRaw.(map[string]any)
-			if !ok {
-				continue
-			}
-			for provider, priceDataRaw := range providers { // tcgplayer, cardmarket, etc.
-				priceData, ok := priceDataRaw.(map[string]any)
-				if !ok {
-					continue
-				}
-				currency, _ := priceData["currency"].(string)
-				if currency == "" {
-					currency = "USD"
-				}
-				for _, categoryName := range []string{"buylist", "retail"} {
-					categoryData, ok := priceData[categoryName].(map[string]any)
-					if !ok {
-						continue
-					}
-					for finish, datePricesRaw := range categoryData { // normal, foil, etched
-						datePrices, ok := datePricesRaw.(map[string]any)
-						if !ok {
-							continue
-						}
-						for date, price := range datePrices {
-							if price == nil {
-								continue
-							}
-							row := map[string]any{
-								"uuid":     uuid,
-								"source":   source,
-								"provider": provider,
-								"currency": currency,
-								"category": categoryName,
-								"finish":   finish,
-								"date":     date,
-								"price":    db.ToFloat64(price),
-							}
-							enc.Encode(row)
-							count++
-						}
-					}
-				}
-			}
-		}
-	}
-	return count
-}
-
-func loadPricesToDuckDB(ctx context.Context, path string, conn *db.Connection) error {
-	f, err := os.Open(path)
-	if err != nil {
-		return fmt.Errorf("mtgjson: open price file: %w", err)
-	}
-	defer f.Close()
-
-	var reader io.Reader = f
-	if strings.HasSuffix(path, ".gz") {
-		gr, err := gzip.NewReader(f)
-		if err != nil {
-			return fmt.Errorf("mtgjson: decompress price file: %w", err)
-		}
-		defer gr.Close()
-		reader = gr
-	}
-
-	var raw map[string]any
-	if err := json.NewDecoder(reader).Decode(&raw); err != nil {
-		return fmt.Errorf("mtgjson: parse price JSON: %w", err)
-	}
-
-	data, _ := raw["data"].(map[string]any)
-	if data == nil {
-		return nil
-	}
-
-	tmpPath := filepath.Join(os.TempDir(), fmt.Sprintf("mtgjson_prices_%d.ndjson", os.Getpid()))
-	ndjson, err := os.Create(tmpPath)
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmpPath)
-
-	count := StreamFlattenPrices(data, ndjson)
-	ndjson.Close()
-
-	if count > 0 {
-		return conn.RegisterTableFromNdjson(ctx, "prices_today", tmpPath)
-	}
-	return nil
 }

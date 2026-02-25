@@ -119,7 +119,7 @@ func (q *SetQuery) GetFinancialSummary(ctx context.Context, setCode string, opts
 	if err := q.conn.EnsureViews(ctx, "cards"); err != nil {
 		return nil, err
 	}
-	if !q.conn.HasView("prices_today") {
+	if err := q.conn.EnsureViews(ctx, "all_prices_today"); err != nil {
 		return nil, nil
 	}
 	cfg := financialSummaryDefaults()
@@ -134,17 +134,17 @@ func (q *SetQuery) GetFinancialSummary(ctx context.Context, setCode string, opts
 		MAX(p.price) AS max_value,
 		MAX(p.date) AS date
 	FROM cards c
-	JOIN prices_today p ON c.uuid = p.uuid
+	JOIN all_prices_today p ON c.uuid = p.uuid
 	WHERE c.setCode = $1
 	  AND p.provider = $2
 	  AND p.currency = $3
 	  AND p.finish = $4
-	  AND p.category = $5
-	  AND p.date = (SELECT MAX(p2.date) FROM prices_today p2)`
+	  AND p.price_type = $5
+	  AND p.date = (SELECT MAX(p2.date) FROM all_prices_today p2)`
 
 	var results []models.FinancialSummary
 	if err := q.conn.ExecuteInto(ctx, &results, sql,
-		strings.ToUpper(setCode), cfg.provider, cfg.currency, cfg.finish, cfg.category,
+		strings.ToUpper(setCode), cfg.provider, cfg.currency, cfg.finish, cfg.priceType,
 	); err != nil {
 		return nil, err
 	}
@@ -170,18 +170,18 @@ func (q *SetQuery) Count(ctx context.Context) (int, error) {
 type FinancialSummaryOption func(*financialSummaryCfg)
 
 type financialSummaryCfg struct {
-	provider string
-	currency string
-	finish   string
-	category string
+	provider  string
+	currency  string
+	finish    string
+	priceType string
 }
 
 func financialSummaryDefaults() financialSummaryCfg {
 	return financialSummaryCfg{
-		provider: "tcgplayer",
-		currency: "USD",
-		finish:   "normal",
-		category: "retail",
+		provider:  "tcgplayer",
+		currency:  "USD",
+		finish:    "normal",
+		priceType: "retail",
 	}
 }
 
@@ -200,7 +200,7 @@ func WithFinish(finish string) FinancialSummaryOption {
 	return func(c *financialSummaryCfg) { c.finish = finish }
 }
 
-// WithCategory sets the price category for financial summary.
-func WithCategory(category string) FinancialSummaryOption {
-	return func(c *financialSummaryCfg) { c.category = category }
+// WithPriceTypeFilter sets the price type for financial summary.
+func WithPriceTypeFilter(priceType string) FinancialSummaryOption {
+	return func(c *financialSummaryCfg) { c.priceType = priceType }
 }

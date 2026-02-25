@@ -30,7 +30,7 @@ func setupSkuQuery(t *testing.T) *SkuQuery {
 	if err := conn.RegisterTableFromData(ctx, "tcgplayer_skus", sampleSkuData); err != nil {
 		t.Fatal(err)
 	}
-	return &SkuQuery{conn: conn, cache: nil, loaded: true}
+	return &SkuQuery{conn: conn}
 }
 
 func TestSkuGet(t *testing.T) {
@@ -116,7 +116,7 @@ func TestSkuFindByProductIDNotFound(t *testing.T) {
 
 func TestSkuNoTable(t *testing.T) {
 	conn := setupSampleDB(t)
-	sq := &SkuQuery{conn: conn, cache: nil, loaded: true}
+	sq := &SkuQuery{conn: conn}
 	ctx := context.Background()
 
 	skus, err := sq.Get(ctx, "card-uuid-001")

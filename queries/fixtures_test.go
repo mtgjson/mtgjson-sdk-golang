@@ -242,17 +242,17 @@ var sampleLegalities = []map[string]any{
 var samplePrices = []map[string]any{
 	{
 		"uuid": "card-uuid-001", "source": "paper", "provider": "tcgplayer",
-		"currency": "USD", "category": "retail", "finish": "normal",
+		"currency": "USD", "price_type": "retail", "finish": "normal",
 		"date": "2024-01-03", "price": 2.00,
 	},
 	{
 		"uuid": "card-uuid-002", "source": "paper", "provider": "tcgplayer",
-		"currency": "USD", "category": "retail", "finish": "normal",
+		"currency": "USD", "price_type": "retail", "finish": "normal",
 		"date": "2024-01-03", "price": 5.00,
 	},
 	{
 		"uuid": "card-uuid-003", "source": "paper", "provider": "tcgplayer",
-		"currency": "USD", "category": "retail", "finish": "normal",
+		"currency": "USD", "price_type": "retail", "finish": "normal",
 		"date": "2024-01-03", "price": 3.00,
 	},
 }

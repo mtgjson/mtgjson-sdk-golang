@@ -131,7 +131,7 @@ func TestSetFinancialSummary(t *testing.T) {
 	ctx := context.Background()
 
 	// Load price data
-	if err := conn.RegisterTableFromData(ctx, "prices_today", samplePrices); err != nil {
+	if err := conn.RegisterTableFromData(ctx, "all_prices_today", samplePrices); err != nil {
 		t.Fatal(err)
 	}
 
@@ -161,7 +161,7 @@ func TestSetFinancialSummarySingleCard(t *testing.T) {
 	conn := setupSampleDB(t)
 	ctx := context.Background()
 
-	if err := conn.RegisterTableFromData(ctx, "prices_today", samplePrices); err != nil {
+	if err := conn.RegisterTableFromData(ctx, "all_prices_today", samplePrices); err != nil {
 		t.Fatal(err)
 	}
 
@@ -199,7 +199,7 @@ func TestSetFinancialSummaryNoDataForSet(t *testing.T) {
 	conn := setupSampleDB(t)
 	ctx := context.Background()
 
-	if err := conn.RegisterTableFromData(ctx, "prices_today", samplePrices); err != nil {
+	if err := conn.RegisterTableFromData(ctx, "all_prices_today", samplePrices); err != nil {
 		t.Fatal(err)
 	}
 

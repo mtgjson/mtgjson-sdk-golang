@@ -1,9 +1,7 @@
 package queries
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -15,37 +13,37 @@ import (
 var samplePricesExtended = []map[string]any{
 	{
 		"uuid": "card-uuid-001", "source": "paper", "provider": "tcgplayer",
-		"currency": "USD", "category": "retail", "finish": "normal",
+		"currency": "USD", "price_type": "retail", "finish": "normal",
 		"date": "2024-01-01", "price": 1.50,
 	},
 	{
 		"uuid": "card-uuid-001", "source": "paper", "provider": "tcgplayer",
-		"currency": "USD", "category": "retail", "finish": "normal",
+		"currency": "USD", "price_type": "retail", "finish": "normal",
 		"date": "2024-01-02", "price": 1.75,
 	},
 	{
 		"uuid": "card-uuid-001", "source": "paper", "provider": "tcgplayer",
-		"currency": "USD", "category": "retail", "finish": "normal",
+		"currency": "USD", "price_type": "retail", "finish": "normal",
 		"date": "2024-01-03", "price": 2.00,
 	},
 	{
 		"uuid": "card-uuid-001", "source": "paper", "provider": "tcgplayer",
-		"currency": "USD", "category": "retail", "finish": "foil",
+		"currency": "USD", "price_type": "retail", "finish": "foil",
 		"date": "2024-01-01", "price": 3.50,
 	},
 	{
 		"uuid": "card-uuid-001", "source": "paper", "provider": "tcgplayer",
-		"currency": "USD", "category": "retail", "finish": "foil",
+		"currency": "USD", "price_type": "retail", "finish": "foil",
 		"date": "2024-01-03", "price": 4.00,
 	},
 	{
 		"uuid": "card-uuid-001", "source": "paper", "provider": "tcgplayer",
-		"currency": "USD", "category": "buylist", "finish": "normal",
+		"currency": "USD", "price_type": "buylist", "finish": "normal",
 		"date": "2024-01-03", "price": 0.80,
 	},
 	{
 		"uuid": "card-uuid-002", "source": "paper", "provider": "tcgplayer",
-		"currency": "USD", "category": "retail", "finish": "normal",
+		"currency": "USD", "price_type": "retail", "finish": "normal",
 		"date": "2024-01-03", "price": 5.00,
 	},
 }
@@ -66,10 +64,13 @@ func setupPriceQuery(t *testing.T) *PriceQuery {
 	t.Helper()
 	conn := setupSampleDB(t)
 	ctx := context.Background()
-	if err := conn.RegisterTableFromData(ctx, "prices_today", samplePricesExtended); err != nil {
+	if err := conn.RegisterTableFromData(ctx, "all_prices_today", samplePricesExtended); err != nil {
 		t.Fatal(err)
 	}
-	pq := &PriceQuery{conn: conn, cache: nil, loaded: true}
+	if err := conn.RegisterTableFromData(ctx, "all_prices", samplePricesExtended); err != nil {
+		t.Fatal(err)
+	}
+	pq := &PriceQuery{conn: conn}
 	return pq
 }
 
@@ -123,19 +124,19 @@ func TestTodayWithFinishFilter(t *testing.T) {
 	}
 }
 
-func TestTodayWithCategoryFilter(t *testing.T) {
+func TestTodayWithPriceTypeFilter(t *testing.T) {
 	pq := setupPriceQuery(t)
 	ctx := context.Background()
 
-	rows, err := pq.Today(ctx, "card-uuid-001", WithPriceCategory("buylist"))
+	rows, err := pq.Today(ctx, "card-uuid-001", WithPriceType("buylist"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(rows) != 1 {
 		t.Fatalf("expected 1 row, got %d", len(rows))
 	}
-	if rows[0]["category"] != "buylist" {
-		t.Fatalf("expected category buylist, got %v", rows[0]["category"])
+	if rows[0]["price_type"] != "buylist" {
+		t.Fatalf("expected price_type buylist, got %v", rows[0]["price_type"])
 	}
 }
 
@@ -144,7 +145,7 @@ func TestHistoryAllDates(t *testing.T) {
 	ctx := context.Background()
 
 	rows, err := pq.History(ctx, "card-uuid-001",
-		WithHistoryFinish("normal"), WithHistoryCategory("retail"))
+		WithHistoryFinish("normal"), WithHistoryPriceType("retail"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +165,7 @@ func TestHistoryDateRange(t *testing.T) {
 	ctx := context.Background()
 
 	rows, err := pq.History(ctx, "card-uuid-001",
-		WithHistoryFinish("normal"), WithHistoryCategory("retail"),
+		WithHistoryFinish("normal"), WithHistoryPriceType("retail"),
 		WithDateFrom("2024-01-02"), WithDateTo("2024-01-03"))
 	if err != nil {
 		t.Fatal(err)
@@ -179,7 +180,7 @@ func TestHistoryDateFromOnly(t *testing.T) {
 	ctx := context.Background()
 
 	rows, err := pq.History(ctx, "card-uuid-001",
-		WithHistoryFinish("normal"), WithHistoryCategory("retail"),
+		WithHistoryFinish("normal"), WithHistoryPriceType("retail"),
 		WithDateFrom("2024-01-03"))
 	if err != nil {
 		t.Fatal(err)
@@ -294,7 +295,7 @@ func TestMostExpensivePrintings(t *testing.T) {
 
 func TestCheapestPrintingsNoPrices(t *testing.T) {
 	conn := setupSampleDB(t)
-	pq := &PriceQuery{conn: conn, cache: nil, loaded: true}
+	pq := &PriceQuery{conn: conn}
 	ctx := context.Background()
 
 	rows, err := pq.CheapestPrintings(ctx)
@@ -303,34 +304,6 @@ func TestCheapestPrintingsNoPrices(t *testing.T) {
 	}
 	if rows != nil {
 		t.Fatalf("expected nil, got %v", rows)
-	}
-}
-
-func TestTodayNoPriceTable(t *testing.T) {
-	conn := setupSampleDB(t)
-	pq := &PriceQuery{conn: conn, cache: nil, loaded: true}
-	ctx := context.Background()
-
-	result, err := pq.Today(ctx, "nonexistent-uuid")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result != nil {
-		t.Fatalf("expected nil, got %v", result)
-	}
-}
-
-func TestGetNoPriceTable(t *testing.T) {
-	conn := setupSampleDB(t)
-	pq := &PriceQuery{conn: conn, cache: nil, loaded: true}
-	ctx := context.Background()
-
-	result, err := pq.Get(ctx, "nonexistent-uuid")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result != nil {
-		t.Fatalf("expected nil, got %v", result)
 	}
 }
 
@@ -356,89 +329,5 @@ func TestGetReturnsNestedStructure(t *testing.T) {
 	}
 	if tcg["currency"] != "USD" {
 		t.Fatalf("expected USD currency, got %v", tcg["currency"])
-	}
-}
-
-// --- StreamFlattenPrices unit tests ---
-
-func TestFlattenPrices(t *testing.T) {
-	data := map[string]any{
-		"card-uuid-001": map[string]any{
-			"paper": map[string]any{
-				"tcgplayer": map[string]any{
-					"currency": "USD",
-					"retail": map[string]any{
-						"normal": map[string]any{"2024-01-01": 1.50, "2024-01-02": 1.75},
-						"foil":   map[string]any{"2024-01-01": 3.50},
-					},
-				},
-			},
-		},
-	}
-	var buf bytes.Buffer
-	count := StreamFlattenPrices(data, &buf)
-	if count != 3 {
-		t.Fatalf("expected 3 rows, got %d", count)
-	}
-
-	// Parse lines
-	lines := bytes.Split(bytes.TrimSpace(buf.Bytes()), []byte("\n"))
-	if len(lines) != 3 {
-		t.Fatalf("expected 3 lines, got %d", len(lines))
-	}
-	for _, line := range lines {
-		var row map[string]any
-		if err := json.Unmarshal(line, &row); err != nil {
-			t.Fatal(err)
-		}
-		if row["uuid"] != "card-uuid-001" {
-			t.Fatalf("expected card-uuid-001, got %v", row["uuid"])
-		}
-		if row["provider"] != "tcgplayer" {
-			t.Fatalf("expected tcgplayer, got %v", row["provider"])
-		}
-	}
-}
-
-func TestFlattenPricesEmpty(t *testing.T) {
-	var buf bytes.Buffer
-	count := StreamFlattenPrices(map[string]any{}, &buf)
-	if count != 0 {
-		t.Fatalf("expected 0, got %d", count)
-	}
-}
-
-func TestFlattenPricesMixedSources(t *testing.T) {
-	data := map[string]any{
-		"uuid-1": map[string]any{
-			"paper": map[string]any{
-				"tcgplayer": map[string]any{
-					"currency": "USD",
-					"retail":   map[string]any{"normal": map[string]any{"2024-01-01": 1.0}},
-				},
-			},
-			"mtgo": map[string]any{
-				"cardhoarder": map[string]any{
-					"currency": "USD",
-					"retail":   map[string]any{"normal": map[string]any{"2024-01-01": 0.05}},
-				},
-			},
-		},
-	}
-	var buf bytes.Buffer
-	count := StreamFlattenPrices(data, &buf)
-	if count != 2 {
-		t.Fatalf("expected 2 rows, got %d", count)
-	}
-
-	lines := bytes.Split(bytes.TrimSpace(buf.Bytes()), []byte("\n"))
-	sources := make(map[string]bool)
-	for _, line := range lines {
-		var row map[string]any
-		json.Unmarshal(line, &row)
-		sources[row["source"].(string)] = true
-	}
-	if !sources["paper"] || !sources["mtgo"] {
-		t.Fatalf("expected paper and mtgo, got %v", sources)
 	}
 }

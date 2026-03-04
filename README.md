@@ -488,6 +488,35 @@ if err != nil {
 }
 ```
 
+## Examples
+
+### Price Intelligence CLI (`examples/price-intel`)
+
+A CLI tool for looking up card prices, tracking price trends, evaluating set value, and resolving cards across platforms like Scryfall, TCGPlayer, and MTGO.
+
+**Subcommands:**
+
+- `identify <id-type> <id>` -- Resolve external platform IDs (Scryfall, TCGPlayer, MTGO, Arena, Multiverse, Cardmarket, Card Kingdom) to MTGJSON cards
+- `price <card-name>` -- Price trend statistics, cheapest printing, and most expensive printings
+- `history <uuid> [--from] [--to]` -- Price history with date range filtering
+- `set-value <set-code>` -- Financial summary for a set (total value, avg/min/max card price)
+- `sealed [--set <code>]` -- Browse sealed products; pass a UUID for detail view
+
+**SDK features showcased:** `Identifiers.FindBy*` (7 platform lookups), `Prices.PriceTrend`, `Prices.History`, `Prices.CheapestPrinting`, `Prices.MostExpensivePrintings`, `Sets.GetFinancialSummary`, `Sealed.List`, `Sealed.Get`, `Cards.GetByName`, `Sets.Get`, and `WithProgress` for download feedback.
+
+**Setup:**
+
+```bash
+cd examples/price-intel
+go build -o price-intel .
+./price-intel set-value MH3
+./price-intel price "Lightning Bolt"
+./price-intel identify tcgplayer "126455"
+./price-intel history <uuid> --from 2026-01-01 --to 2026-03-01
+```
+
+> First run downloads parquet data from the MTGJSON CDN (~30s cold start). Subsequent runs use the local cache.
+
 ## Architecture
 
 ```

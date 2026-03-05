@@ -1,6 +1,17 @@
 # mtgjson-sdk-go
 
-A DuckDB-backed Go query client for [MTGJSON](https://mtgjson.com) card data. Auto-downloads Parquet data from the MTGJSON CDN and exposes the full Magic: The Gathering dataset through a typed Go API with context support and functional options.
+A high-performance, DuckDB-backed Go query client for [MTGJSON](https://mtgjson.com).
+
+Unlike traditional SDKs that rely on rate-limited REST APIs, `mtgjson-sdk-go` implements a local data warehouse architecture. It synchronizes optimized Parquet data from the MTGJSON CDN to your local machine, utilizing DuckDB to execute complex analytics, fuzzy searches, and booster simulations with sub-millisecond latency.
+
+## Key Features
+
+*   **Vectorized Execution**: Powered by DuckDB for high-speed OLAP queries on the full MTG dataset.
+*   **Offline-First**: Data is cached locally, allowing for full functionality without an active internet connection.
+*   **Fuzzy Search**: Built-in Jaro-Winkler similarity matching to handle typos and approximate name lookups.
+*   **Context Support**: All methods accept `context.Context` for cancellation and timeouts.
+*   **Functional Options**: Idiomatic Go configuration with composable `With*` option functions.
+*   **Booster Simulation**: Accurate pack opening logic using official MTGJSON weights and sheet configurations.
 
 ## Install
 
@@ -56,19 +67,28 @@ func main() {
 }
 ```
 
+## Architecture
+
+By using DuckDB, the SDK leverages columnar storage and vectorized execution, making it significantly faster than SQLite or standard JSON parsing for MTG's relational dataset.
+
+1.  **Synchronization**: On first use, the SDK lazily downloads Parquet and JSON files from the MTGJSON CDN to a platform-specific cache directory (`~/.cache/mtgjson-sdk` on Linux, `~/Library/Caches/mtgjson-sdk` on macOS, `AppData/Local/mtgjson-sdk` on Windows).
+2.  **Virtual Schema**: DuckDB views are registered on-demand. Accessing `sdk.Cards()` registers the card view; accessing `sdk.Prices()` registers price data. You only pay the memory cost for the data you query.
+3.  **Dynamic Adaptation**: The SDK introspects Parquet metadata to automatically handle schema changes, plural-column array conversion, and format legality unpivoting.
+4.  **Materialization**: Queries return typed Go structs for individual record ergonomics, or `map[string]any` for flexible consumption.
+
 ## Use Cases
 
-### Price Tracking
+### Price Analytics
 
 ```go
 ctx := context.Background()
 sdk, _ := mtgjson.New()
 defer sdk.Close()
 
-// Find the cheapest printing of any card
+// Find the cheapest printing of a card by name
 cheapest, _ := sdk.Prices().CheapestPrinting(ctx, "Ragavan, Nimble Pilferer")
 
-// Price trend over time
+// Aggregate statistics (min, max, avg) for a specific card
 uuid := cheapest["uuid"].(string)
 trend, _ := sdk.Prices().PriceTrend(ctx, uuid,
 	queries.WithPriceProvider("tcgplayer"),
@@ -77,50 +97,53 @@ trend, _ := sdk.Prices().PriceTrend(ctx, uuid,
 fmt.Printf("Range: $%.2f - $%.2f\n", trend.MinPrice, trend.MaxPrice)
 fmt.Printf("Average: $%.2f over %d data points\n", trend.AvgPrice, trend.DataPoints)
 
-// Full price history with date range
+// Historical price lookup with date filtering
 history, _ := sdk.Prices().History(ctx, uuid,
 	queries.WithHistoryProvider("tcgplayer"),
 	queries.WithDateFrom("2024-01-01"),
 	queries.WithDateTo("2024-12-31"),
 )
 
-// Most expensive printings across the entire dataset
+// Top 10 most expensive printings across the entire dataset
 priciest, _ := sdk.Prices().MostExpensivePrintings(ctx,
 	queries.WithListLimit(10),
 )
 ```
 
-### Deck Building Helper
+### Advanced Card Search
+
+The `Search()` method supports ~20 composable filters that can be combined freely:
 
 ```go
 ctx := context.Background()
 sdk, _ := mtgjson.New()
 defer sdk.Close()
 
-// Find modern-legal red creatures with CMC <= 2
+// Complex filters: Modern-legal red creatures with CMC <= 2
 manaValueLte := 2.0
 aggro, _ := sdk.Cards().Search(ctx, queries.SearchCardsParams{
-	Colors:      []string{"R"},
-	Types:       "Creature",
+	Colors:       []string{"R"},
+	Types:        "Creature",
 	ManaValueLTE: &manaValueLte,
-	LegalIn:     "modern",
-	Limit:       50,
+	LegalIn:      "modern",
+	Limit:        50,
 })
 
-// Check what's banned
-banned, _ := sdk.Legalities().BannedIn(ctx, "modern")
-fmt.Printf("%d cards banned in Modern\n", len(banned))
+// Typo-tolerant fuzzy search (Jaro-Winkler similarity)
+results, _ := sdk.Cards().Search(ctx, queries.SearchCardsParams{
+	FuzzyName: "Ligtning Bolt",  // still finds it!
+})
 
-// Search by keyword ability
+// Rules text search using regular expressions
+burn, _ := sdk.Cards().Search(ctx, queries.SearchCardsParams{
+	TextRegex: `deals? \d+ damage to any target`,
+})
+
+// Search by keyword ability across formats
 flyers, _ := sdk.Cards().Search(ctx, queries.SearchCardsParams{
 	Keyword: "Flying",
 	Colors:  []string{"W", "U"},
 	LegalIn: "standard",
-})
-
-// Fuzzy search -- handles typos
-results, _ := sdk.Cards().Search(ctx, queries.SearchCardsParams{
-	FuzzyName: "Ligtning Bolt",  // still finds it!
 })
 
 // Find cards by foreign-language name
@@ -129,44 +152,79 @@ blitz, _ := sdk.Cards().Search(ctx, queries.SearchCardsParams{
 })
 ```
 
-### Collection Management
+<details>
+<summary>All <code>SearchCardsParams</code> fields</summary>
+
+| Field | Type | Description |
+|---|---|---|
+| `Name` | `string` | Name pattern (`%` = wildcard) |
+| `FuzzyName` | `string` | Typo-tolerant Jaro-Winkler match |
+| `LocalizedName` | `string` | Foreign-language name search |
+| `Colors` | `[]string` | Cards containing these colors |
+| `ColorIdentity` | `[]string` | Color identity filter |
+| `LegalIn` | `string` | Format legality |
+| `Rarity` | `string` | Rarity filter |
+| `ManaValue` | `*float64` | Exact mana value |
+| `ManaValueLTE` | `*float64` | Mana value upper bound |
+| `ManaValueGTE` | `*float64` | Mana value lower bound |
+| `Text` | `string` | Rules text substring |
+| `TextRegex` | `string` | Rules text regex |
+| `Types` | `string` | Type line search |
+| `Artist` | `string` | Artist name |
+| `Keyword` | `string` | Keyword ability |
+| `IsPromo` | `*bool` | Promo status |
+| `Availability` | `string` | `"paper"` or `"mtgo"` |
+| `Language` | `string` | Language filter |
+| `Layout` | `string` | Card layout |
+| `SetCode` | `string` | Set code |
+| `SetType` | `string` | Set type (joins sets table) |
+| `Power` | `string` | Power filter |
+| `Toughness` | `string` | Toughness filter |
+| `Limit` / `Offset` | `int` | Pagination |
+
+</details>
+
+### Collection & Cross-Reference
 
 ```go
 ctx := context.Background()
 sdk, _ := mtgjson.New()
 defer sdk.Close()
 
-// Cross-reference by Scryfall ID
+// Cross-reference by any external ID system
 cards, _ := sdk.Identifiers().FindByScryfallID(ctx, "f7a21fe4-...")
-
-// Look up by TCGPlayer product ID
 cards, _ = sdk.Identifiers().FindByTCGPlayerID(ctx, "12345")
+cards, _ = sdk.Identifiers().FindByMTGOID(ctx, "67890")
 
-// Get all identifiers for a card (Scryfall, TCGPlayer, MTGO, Arena, etc.)
+// Get all external identifiers for a card
 allIDs, _ := sdk.Identifiers().GetIdentifiers(ctx, "card-uuid-here")
+// -> Scryfall, TCGPlayer, MTGO, Arena, Cardmarket, Card Kingdom, Cardsphere, ...
+
+// TCGPlayer SKU variants (foil, etched, etc.)
+skus, _ := sdk.Skus().Get(ctx, "card-uuid-here")
 
 // Export to a standalone DuckDB file for offline analysis
 sdk.ExportDB(ctx, "my_collection.duckdb")
 // Now query with: duckdb my_collection.duckdb "SELECT * FROM cards LIMIT 5"
 ```
 
-### Booster Pack Simulation
+### Booster Simulation
 
 ```go
 ctx := context.Background()
 sdk, _ := mtgjson.New()
 defer sdk.Close()
 
-// See what booster types are available
+// See available booster types for a set
 types, _ := sdk.Booster().AvailableTypes(ctx, "MH3")  // ["draft", "collector", ...]
 
-// Open a single draft pack
+// Open a single draft pack using official set weights
 pack, _ := sdk.Booster().OpenPack(ctx, "MH3", "draft")
 for _, card := range pack {
 	fmt.Printf("  %s (%s)\n", card.Name, card.Rarity)
 }
 
-// Open an entire box
+// Simulate opening a full box (36 packs)
 box, _ := sdk.Booster().OpenBox(ctx, "MH3", "draft", 36)
 totalCards := 0
 for _, p := range box {
@@ -177,183 +235,119 @@ fmt.Printf("Opened %d packs, %d total cards\n", len(box), totalCards)
 
 ## API Reference
 
-### Cards
+### Core Data
 
 ```go
-sdk.Cards().GetByUUID(ctx, "uuid")                    // -> (*CardSet, error)
-sdk.Cards().GetByUUIDs(ctx, []string{"uuid1", "uuid2"})  // -> ([]CardSet, error)
-sdk.Cards().GetByName(ctx, "Lightning Bolt")           // -> ([]CardSet, error)
-sdk.Cards().GetByName(ctx, "Lightning Bolt", "A25")    // with set filter
-sdk.Cards().Search(ctx, SearchCardsParams{
-    Name:          "Lightning%",       // name pattern (% = wildcard)
-    FuzzyName:     "Ligtning Bolt",    // typo-tolerant (Jaro-Winkler)
-    LocalizedName: "Blitzschlag",      // foreign-language name search
-    Colors:        []string{"R"},      // cards containing these colors
-    ColorIdentity: []string{"R", "U"}, // filter by color identity
-    LegalIn:       "modern",           // format legality
-    Rarity:        "rare",             // rarity filter
-    ManaValue:     &manaVal,           // exact mana value (*float64)
-    ManaValueLTE:  &manaMax,           // mana value range
-    ManaValueGTE:  &manaMin,
-    Text:          "damage",           // rules text search
-    TextRegex:     `deals? \d+ damage`,// regex rules text search
-    Types:         "Creature",         // type line search
-    Artist:        "Christopher Moeller",
-    Keyword:       "Flying",           // keyword ability
-    IsPromo:       &isPromo,           // promo status (*bool)
-    Availability:  "paper",            // paper, mtgo
-    Language:      "English",          // language filter
-    Layout:        "normal",           // card layout
-    SetCode:       "MH3",             // filter by set
-    SetType:       "expansion",        // set type (joins sets table)
-    Power:         "3",                // P/T filter
-    Toughness:     "3",
-    Limit:         100,                // pagination
-    Offset:        0,
-})                                                     // -> ([]CardSet, error)
-sdk.Cards().GetPrintings(ctx, "Lightning Bolt")        // all printings across sets
-sdk.Cards().GetAtomic(ctx, "Lightning Bolt")           // oracle data (no printing info)
-sdk.Cards().FindByScryfallID(ctx, "...")               // cross-reference
-sdk.Cards().Random(ctx, 5)                             // random cards
-sdk.Cards().Count(ctx)                                 // total count
-sdk.Cards().Count(ctx, Filter{"setCode", "MH3"})      // filtered count
-```
+// Cards
+sdk.Cards().GetByUUID(ctx, "uuid")               // single card lookup
+sdk.Cards().GetByUUIDs(ctx, []string{"uuid1"})   // batch lookup
+sdk.Cards().GetByName(ctx, "Lightning Bolt")     // all printings of a name
+sdk.Cards().Search(ctx, SearchCardsParams{...})  // composable filters (see above)
+sdk.Cards().GetPrintings(ctx, "Lightning Bolt")  // all printings across sets
+sdk.Cards().GetAtomic(ctx, "Lightning Bolt")     // oracle data (no printing info)
+sdk.Cards().FindByScryfallID(ctx, "...")         // cross-reference shortcut
+sdk.Cards().Random(ctx, 5)                       // random cards
+sdk.Cards().Count(ctx)                           // total (or filtered with kwargs)
 
-### Tokens
-
-```go
-sdk.Tokens().GetByUUID(ctx, "uuid")                    // -> (*CardToken, error)
-sdk.Tokens().GetByName(ctx, "Soldier")                 // -> ([]CardToken, error)
-sdk.Tokens().Search(ctx, SearchTokensParams{
-    Name: "%Token", SetCode: "MH3", Colors: []string{"W"},
-})
-sdk.Tokens().ForSet(ctx, "MH3")                        // all tokens for a set
+// Tokens
+sdk.Tokens().GetByUUID(ctx, "uuid")
+sdk.Tokens().GetByName(ctx, "Soldier")
+sdk.Tokens().Search(ctx, SearchTokensParams{Name: "%Token", SetCode: "MH3"})
+sdk.Tokens().ForSet(ctx, "MH3")
 sdk.Tokens().Count(ctx)
-```
 
-### Sets
-
-```go
-sdk.Sets().Get(ctx, "MH3")                             // -> (*SetList, error)
+// Sets
+sdk.Sets().Get(ctx, "MH3")
 sdk.Sets().List(ctx, ListSetsParams{SetType: "expansion"})
-sdk.Sets().Search(ctx, SearchSetsParams{
-    Name: "Horizons", ReleaseYear: &year,
-})
-sdk.Sets().GetFinancialSummary(ctx, "MH3",             // -> (*FinancialSummary, error)
-    WithProvider("tcgplayer"),
-    WithCurrency("USD"),
-    WithFinish("normal"),
-)
+sdk.Sets().Search(ctx, SearchSetsParams{Name: "Horizons"})
+sdk.Sets().GetFinancialSummary(ctx, "MH3", WithProvider("tcgplayer"))
 sdk.Sets().Count(ctx)
 ```
 
-### Identifiers
+### Playability
 
 ```go
-sdk.Identifiers().FindByScryfallID(ctx, "...")
-sdk.Identifiers().FindByTCGPlayerID(ctx, "...")
-sdk.Identifiers().FindByMTGOID(ctx, "...")
-sdk.Identifiers().FindByMTGOFoilID(ctx, "...")
-sdk.Identifiers().FindByMTGArenaID(ctx, "...")
-sdk.Identifiers().FindByMultiverseID(ctx, "...")
-sdk.Identifiers().FindByMCMID(ctx, "...")
-sdk.Identifiers().FindByCardKingdomID(ctx, "...")
-sdk.Identifiers().FindByCardKingdomFoilID(ctx, "...")
-sdk.Identifiers().FindByCardKingdomEtchedID(ctx, "...")
-sdk.Identifiers().FindByCardsphereID(ctx, "...")
-sdk.Identifiers().FindByCardsphereFoilID(ctx, "...")
-sdk.Identifiers().FindByScryfallOracleID(ctx, "...")
-sdk.Identifiers().FindByScryfallIllustrationID(ctx, "...")
-sdk.Identifiers().FindByTCGPlayerEtchedID(ctx, "...")
-sdk.Identifiers().FindBy(ctx, "scryfallId", "...")     // generic lookup
-sdk.Identifiers().GetIdentifiers(ctx, "uuid")          // all IDs for a card
-```
+// Legalities
+sdk.Legalities().FormatsForCard(ctx, "uuid")     // -> (map[string]string, error)
+sdk.Legalities().LegalIn(ctx, "modern")          // all modern-legal cards
+sdk.Legalities().IsLegal(ctx, "uuid", "modern")  // -> (bool, error)
+sdk.Legalities().BannedIn(ctx, "modern")         // also: RestrictedIn, SuspendedIn
 
-### Legalities
-
-```go
-sdk.Legalities().FormatsForCard(ctx, "uuid")           // -> (map[string]string, error)
-sdk.Legalities().LegalIn(ctx, "modern")                // all modern-legal cards
-sdk.Legalities().IsLegal(ctx, "uuid", "modern")        // -> (bool, error)
-sdk.Legalities().BannedIn(ctx, "modern")               // banned cards
-sdk.Legalities().RestrictedIn(ctx, "vintage")           // restricted cards
-sdk.Legalities().SuspendedIn(ctx, "historic")           // suspended cards
-sdk.Legalities().NotLegalIn(ctx, "standard")            // not-legal cards
-```
-
-### Prices
-
-```go
-sdk.Prices().Get(ctx, "uuid")                          // full nested price data
-sdk.Prices().Today(ctx, "uuid",                        // latest prices
-    WithPriceProvider("tcgplayer"),
-    WithPriceFinish("foil"),
-)
-sdk.Prices().History(ctx, "uuid",                      // historical prices
-    WithHistoryProvider("tcgplayer"),
-    WithDateFrom("2024-01-01"),
-)
-sdk.Prices().PriceTrend(ctx, "uuid")                   // min/max/avg statistics
-sdk.Prices().CheapestPrinting(ctx, "Lightning Bolt")   // cheapest printing by name
-sdk.Prices().CheapestPrintings(ctx,                    // N cheapest cards overall
-    WithListLimit(10),
-)
-sdk.Prices().MostExpensivePrintings(ctx,               // most expensive cards
-    WithListLimit(10),
-)
-```
-
-### Decks
-
-```go
+// Decks & Sealed Products
 sdk.Decks().List(ctx, ListDecksParams{SetCode: "MH3"})
 sdk.Decks().Search(ctx, SearchDecksParams{Name: "Eldrazi"})
 sdk.Decks().Count(ctx)
-```
-
-### Sealed Products
-
-```go
 sdk.Sealed().List(ctx, ListSealedParams{SetCode: "MH3"})
 sdk.Sealed().Get(ctx, "uuid")
 ```
 
-### SKUs
+### Market & Identifiers
 
 ```go
-sdk.Skus().Get(ctx, "uuid")                            // TCGPlayer SKUs for a card
+// Prices
+sdk.Prices().Get(ctx, "uuid")                    // full nested price data
+sdk.Prices().Today(ctx, "uuid", WithPriceProvider("tcgplayer"))
+sdk.Prices().History(ctx, "uuid", WithHistoryProvider("tcgplayer"))
+sdk.Prices().PriceTrend(ctx, "uuid")             // min/max/avg statistics
+sdk.Prices().CheapestPrinting(ctx, "Lightning Bolt")
+sdk.Prices().MostExpensivePrintings(ctx, WithListLimit(10))
+
+// Identifiers (supports all major external ID systems)
+sdk.Identifiers().FindByScryfallID(ctx, "...")
+sdk.Identifiers().FindByTCGPlayerID(ctx, "...")
+sdk.Identifiers().FindByMTGOID(ctx, "...")
+sdk.Identifiers().FindByMTGArenaID(ctx, "...")
+sdk.Identifiers().FindByMultiverseID(ctx, "...")
+sdk.Identifiers().FindByMCMID(ctx, "...")
+sdk.Identifiers().FindByCardKingdomID(ctx, "...")
+sdk.Identifiers().FindBy(ctx, "scryfallId", "...")  // generic lookup
+sdk.Identifiers().GetIdentifiers(ctx, "uuid")       // all IDs for a card
+
+// SKUs
+sdk.Skus().Get(ctx, "uuid")
 sdk.Skus().FindBySkuID(ctx, 123456)
 sdk.Skus().FindByProductID(ctx, 789)
 ```
 
-### Booster Simulation
+### Booster & Enums
 
 ```go
-sdk.Booster().AvailableTypes(ctx, "MH3")               // -> ([]string, error)
-sdk.Booster().OpenPack(ctx, "MH3", "draft")            // -> ([]CardSet, error)
-sdk.Booster().OpenBox(ctx, "MH3", "draft", 36)         // -> ([][]CardSet, error)
-sdk.Booster().SheetContents(ctx, "MH3", "draft", "common")  // card weights
+sdk.Booster().AvailableTypes(ctx, "MH3")
+sdk.Booster().OpenPack(ctx, "MH3", "draft")
+sdk.Booster().OpenBox(ctx, "MH3", "draft", 36)
+sdk.Booster().SheetContents(ctx, "MH3", "draft", "common")
+
+sdk.Enums().Keywords(ctx)
+sdk.Enums().CardTypes(ctx)
+sdk.Enums().EnumValues(ctx)
 ```
 
-### Enums
+### System
 
 ```go
-sdk.Enums().Keywords(ctx)                              // -> (map[string]any, error)
-sdk.Enums().CardTypes(ctx)                             // -> (map[string]any, error)
-sdk.Enums().EnumValues(ctx)                            // all enum values
+sdk.Meta(ctx)                                    // version and build date
+sdk.Views()                                      // registered view names
+sdk.Refresh(ctx)                                 // check CDN for new data -> (bool, error)
+sdk.ExportDB(ctx, "output.duckdb")               // export to persistent DuckDB file
+sdk.SQL(ctx, query, params...)                   // raw parameterized SQL
+sdk.EnsureViews(ctx, "cards", "sets")            // pre-download specific tables
+sdk.Connection()                                 // *db.Connection for advanced usage
+sdk.Close()                                      // release resources
 ```
 
-### Metadata & Utilities
+## Performance and Memory
+
+When querying large datasets (thousands of cards), use `map[string]any` results from raw SQL rather than deserializing into structs. This avoids the reflection overhead of `json.Unmarshal` for bulk analysis.
 
 ```go
-sdk.Meta(ctx)                                          // -> (Meta, error)
-sdk.Views()                                            // -> []string
-sdk.Refresh(ctx)                                       // check for new data -> (bool, error)
-sdk.SQL(ctx, "SELECT ...", params...)                   // raw parameterized SQL ($1, $2, ...)
-sdk.ExportDB(ctx, "output.duckdb")                     // export to persistent DuckDB file
-sdk.EnsureViews(ctx, "cards", "sets")                  // pre-download specific tables
-sdk.Connection()                                       // *db.Connection for advanced usage
-sdk.Close()                                            // release resources
+// Use raw SQL for bulk analysis
+rows, _ := sdk.SQL(ctx, `
+    SELECT setCode, COUNT(*) as card_count, AVG(manaValue) as avg_cmc
+    FROM cards
+    GROUP BY setCode
+    ORDER BY card_count DESC
+    LIMIT 10
+`)
 ```
 
 ## Advanced Usage
@@ -393,24 +387,33 @@ if err != nil {
 }
 ```
 
-### Database Export
+### Auto-Refresh for Long-Running Services
 
-Export all loaded data to a standalone DuckDB file that can be queried without the SDK:
+```go
+// In a scheduled task or health check:
+stale, err := sdk.Refresh(ctx)
+if err != nil {
+    log.Printf("Refresh check failed: %v", err)
+} else if stale {
+    log.Println("New MTGJSON data detected -- cache refreshed")
+}
+```
+
+### Raw SQL
+
+All user input goes through DuckDB parameter binding (`$1`, `$2`, ...):
 
 ```go
 ctx := context.Background()
-sdk, _ := mtgjson.New()
-defer sdk.Close()
 
-// Touch the query modules you want exported
-sdk.Cards().Count(ctx)
-sdk.Sets().Count(ctx)
+// Ensure views are registered before querying
+sdk.EnsureViews(ctx, "cards")
 
-// Export to file
-sdk.ExportDB(ctx, "mtgjson.duckdb")
-
-// Now use it standalone:
-// $ duckdb mtgjson.duckdb "SELECT name, setCode FROM cards LIMIT 10"
+// Parameterized queries
+rows, _ := sdk.SQL(ctx,
+    "SELECT name, setCode, rarity FROM cards WHERE manaValue <= $1 AND rarity = $2",
+    2, "mythic",
+)
 ```
 
 ### Web API Example
@@ -450,44 +453,6 @@ func main() {
 }
 ```
 
-### Raw SQL
-
-All user input goes through DuckDB parameter binding (`$1`, `$2`, ...) to prevent SQL injection:
-
-```go
-ctx := context.Background()
-
-// Ensure views are registered before querying
-sdk.EnsureViews(ctx, "cards")
-
-// Parameterized queries
-rows, _ := sdk.SQL(ctx,
-    "SELECT name, setCode, rarity FROM cards WHERE manaValue <= $1 AND rarity = $2",
-    2, "mythic",
-)
-
-// Complex analytics
-rows, _ = sdk.SQL(ctx, `
-    SELECT setCode, COUNT(*) as card_count, AVG(manaValue) as avg_cmc
-    FROM cards
-    GROUP BY setCode
-    ORDER BY card_count DESC
-    LIMIT 10
-`)
-```
-
-### Auto-Refresh for Long-Running Services
-
-```go
-// In a scheduled task or health check:
-stale, err := sdk.Refresh(ctx)
-if err != nil {
-    log.Printf("Refresh check failed: %v", err)
-} else if stale {
-    log.Println("New MTGJSON data detected -- cache refreshed")
-}
-```
-
 ## Examples
 
 ### Price Intelligence CLI (`examples/price-intel`)
@@ -517,63 +482,13 @@ go build -o price-intel .
 
 > First run downloads parquet data from the MTGJSON CDN (~30s cold start). Subsequent runs use the local cache.
 
-## Architecture
-
-```
-MTGJSON CDN (Parquet + JSON files)
-        |
-        | auto-download on first access
-        v
-Local Cache (platform-specific directory)
-        |
-        | lazy view registration
-        v
-DuckDB In-Memory Database
-        |
-        | parameterized SQL queries
-        v
-Typed Go API (structs / map[string]any)
-```
-
-**How it works:**
-
-1. **Auto-download**: On first use, the SDK downloads ~15 Parquet files and ~7 JSON files from the MTGJSON CDN to a platform-specific cache directory (`~/.cache/mtgjson-sdk` on Linux, `~/Library/Caches/mtgjson-sdk` on macOS, `AppData/Local/mtgjson-sdk` on Windows).
-
-2. **Lazy loading**: DuckDB views are registered on-demand -- accessing `sdk.Cards()` triggers the cards view, `sdk.Prices()` triggers price data loading, etc. Only the data you use gets loaded into memory.
-
-3. **Schema adaptation**: The SDK auto-detects array columns in parquet files using a hybrid heuristic (static baseline + dynamic plural detection + blocklist), so it adapts to upstream MTGJSON schema changes without code updates.
-
-4. **Legality UNPIVOT**: Format legality columns are dynamically detected from the parquet schema and UNPIVOTed to `(uuid, format, status)` rows -- automatically scales to new formats.
-
-5. **Price flattening**: Deeply nested JSON price data is streamed to NDJSON and bulk-loaded into DuckDB, minimizing memory overhead.
-
 ## Development
-
-### Prerequisites
-
-- Go 1.25+
-
-### Setup
 
 ```bash
 git clone https://github.com/the-muppet2/mtgjson-sdk-go.git
 cd mtgjson-sdk-go
 go mod download
-```
-
-### Running Tests
-
-```bash
-# Unit tests (120+ tests, no network required)
 go test ./...
-
-# Smoke test (downloads real data from CDN)
-go test -run TestSmoke -tags smoke -v ./...
-```
-
-### Linting
-
-```bash
 go vet ./...
 ```
 

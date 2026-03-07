@@ -485,13 +485,18 @@ go build -o price-intel .
 ## Development
 
 ```bash
-git clone https://github.com/the-muppet2/mtgjson-sdk-go.git
+git clone https://github.com/mtgjson/mtgjson-sdk-go.git
 cd mtgjson-sdk-go
 go mod download
 go test ./...
 go vet ./...
 ```
 
+## Authors
+
+- **Zachary Halpern** — [zach@mtgjson.com](mailto:zach@mtgjson.com)
+- **Robert Pratt**
+
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE) for details.
